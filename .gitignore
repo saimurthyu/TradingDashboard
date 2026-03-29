@@ -1,6 +1,27 @@
-node_modules
-dist
+# Secret keys — never upload to GitHub
 .env
-.DS_Store
-*.local
+.env.local
+.env.production
+.env.development
+
+# Dependencies — too large to upload, npm install recreates them
+node_modules
+
+# Build output — Vercel builds this fresh on every deploy
+dist
+build
+
+# Vercel internals
 .vercel
+
+# OS junk files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
