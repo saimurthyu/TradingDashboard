@@ -263,9 +263,34 @@ async function analyzeMarket({ fg, momentum, news, apiKey, prices }) {
     ? `\n\nHARD RULE — LIVE PRICE OVERRIDES EVERYTHING:\n${priceConstraints}\nDo NOT set bias opposite to live price direction under any circumstance.\n`
     : "";
 
+  // Build dynamic bias hints from live prices so the JSON template
+  // never anchors the model to a hardcoded direction
+  const biaHint = (assetId) => {
+    const p = prices?.[assetId];
+    if (p?.live && p.trend) return p.trend === "bullish" ? "Bullish" : "Bearish";
+    return "Neutral";
+  };
+
   return groq(apiKey, [
-    { role:"system", content:"You are a Wall Street ICT trading analyst. Return ONLY valid JSON. No markdown." },
-    { role:"user", content:`Analyze real-time market data for OIL, GOLD, NQ futures trading.${hardRule}\n\nFear & Greed: ${fg.value}/100 (${fg.label})\nPrice momentum: ${momText}\nLatest news:\n${newsText}\n\nIMPORTANT KILLZONE RULES:\n- OIL/GOLD best killzone = London Open 2-5AM EST or NY AM 7-10AM EST\n- NQ best killzone = NY Open 9:30-11AM EST or NY PM 1-3PM EST\n\nReturn this exact JSON:\n{"regime":"UNCERTAINTY","regime_reason":"one sentence","correlation_warning":"one sentence or null","dxy_bias":"Bearish","dxy_reason":"one sentence","session_note":"one sentence","smart_money_note":"one sentence","assets":{"OIL":{"bias":"Bearish","move_type":"3-5 word phrase","approach":"entry stop target sentence","sentiment_edge":"Bearish","crowd_vs_smart":"Against crowd","smt_signal":"Diverging","smt_note":"one sentence","dxy_impact":"Headwind","killzone_edge":"London Open","key_level_bull":"$97","key_level_bear":"$91","bullish_real_pct":28,"bullish_trap_pct":72,"bearish_real_pct":68,"bearish_trap_pct":32},"GOLD":{"bias":"Bearish","move_type":"3-5 word phrase","approach":"sentence","sentiment_edge":"Bearish","crowd_vs_smart":"With crowd","smt_signal":"Confirming","smt_note":"sentence","dxy_impact":"Headwind","killzone_edge":"London Open","key_level_bull":"$5000","key_level_bear":"$4550","bullish_real_pct":22,"bullish_trap_pct":78,"bearish_real_pct":72,"bearish_trap_pct":28},"NQ":{"bias":"Trap","move_type":"3-5 word phrase","approach":"sentence","sentiment_edge":"Bullish","crowd_vs_smart":"Against crowd","smt_signal":"Diverging","smt_note":"sentence","dxy_impact":"Neutral","killzone_edge":"NY Open","key_level_bull":"25025","key_level_bear":"24411","bullish_real_pct":35,"bullish_trap_pct":65,"bearish_real_pct":58,"bearish_trap_pct":42}},"pair_trade":"sentence","risk_event":"sentence","macro_summary":"two sentences"}` },
+    { role:"system", content:"You are a Wall Street ICT trading analyst. Return ONLY valid JSON. No markdown. You MUST respect the HARD RULE about live price direction — never contradict it." },
+    { role:"user", content:`Analyze real-time market data for OIL, GOLD, NQ futures trading.${hardRule}
+
+Fear & Greed: ${fg.value}/100 (${fg.label})
+Price momentum: ${momText}
+Latest news:
+${newsText}
+
+IMPORTANT KILLZONE RULES:
+- OIL/GOLD best killzone = London Open 2-5AM EST or NY AM 7-10AM EST
+- NQ best killzone = NY Open 9:30-11AM EST or NY PM 1-3PM EST
+
+REMINDER: The bias fields below MUST match the live price direction from the HARD RULE above.
+OIL bias must be: "${biaHint("OIL")}"
+GOLD bias must be: "${biaHint("GOLD")}"
+NQ bias must be: "${biaHint("NQ")}"
+
+Return this exact JSON structure (fill all values based on real analysis — do NOT copy these placeholder numbers):
+{"regime":"<RISK-ON|RISK-OFF|STAGFLATION|UNCERTAINTY|NEUTRAL>","regime_reason":"<sentence>","correlation_warning":"<sentence or null>","dxy_bias":"<Bullish|Bearish|Neutral>","dxy_reason":"<sentence>","session_note":"<sentence>","smart_money_note":"<sentence>","assets":{"OIL":{"bias":"${biaHint("OIL")}","move_type":"<3-5 word phrase>","approach":"<entry stop target sentence>","sentiment_edge":"<Bullish|Bearish|Neutral>","crowd_vs_smart":"<With crowd|Against crowd>","smt_signal":"<Confirming|Diverging|Neutral>","smt_note":"<sentence>","dxy_impact":"<Headwind|Tailwind|Neutral>","killzone_edge":"<session name>","key_level_bull":"<price>","key_level_bear":"<price>","bullish_real_pct":<0-100>,"bullish_trap_pct":<0-100>,"bearish_real_pct":<0-100>,"bearish_trap_pct":<0-100>},"GOLD":{"bias":"${biaHint("GOLD")}","move_type":"<3-5 word phrase>","approach":"<sentence>","sentiment_edge":"<Bullish|Bearish|Neutral>","crowd_vs_smart":"<With crowd|Against crowd>","smt_signal":"<Confirming|Diverging|Neutral>","smt_note":"<sentence>","dxy_impact":"<Headwind|Tailwind|Neutral>","killzone_edge":"<session name>","key_level_bull":"<price>","key_level_bear":"<price>","bullish_real_pct":<0-100>,"bullish_trap_pct":<0-100>,"bearish_real_pct":<0-100>,"bearish_trap_pct":<0-100>},"NQ":{"bias":"${biaHint("NQ")}","move_type":"<3-5 word phrase>","approach":"<sentence>","sentiment_edge":"<Bullish|Bearish|Neutral>","crowd_vs_smart":"<With crowd|Against crowd>","smt_signal":"<Confirming|Diverging|Neutral>","smt_note":"<sentence>","dxy_impact":"<Headwind|Tailwind|Neutral>","killzone_edge":"<session name>","key_level_bull":"<price>","key_level_bear":"<price>","bullish_real_pct":<0-100>,"bullish_trap_pct":<0-100>,"bearish_real_pct":<0-100>,"bearish_trap_pct":<0-100>}},"pair_trade":"<sentence>","risk_event":"<sentence>","macro_summary":"<two sentences>"}` },
   ], 1800);
 }
 
