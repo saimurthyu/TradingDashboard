@@ -98,17 +98,17 @@ async function fetchJSON(url, opts = {}, ms = 9000) {
   catch (e) { clearTimeout(id); throw e; }
 }
 
-// ─── THE KEY FIX: single source of truth for bias ─────────────────────
-// Called in BOTH AssetCard (Intel) and BiasTab — guarantees consistency
+// ─── FIXED: resolveEffectiveBias ──────────────────────────────────────
+// Live price always wins when it conflicts with AI bias.
+// Returns source: "ai" | "live" | "none" for clear badge labelling.
 function resolveEffectiveBias(aiBias, priceData) {
-  if (!aiBias) return { bias:null, overridden:false };
-  if (!priceData?.live || !priceData?.trend) return { bias:aiBias, overridden:false };
-  const conflict =
-    (aiBias === "Bullish" && priceData.trend === "bearish") ||
-    (aiBias === "Bearish" && priceData.trend === "bullish");
-  return conflict
-    ? { bias:priceData.trend === "bullish" ? "Bullish" : "Bearish", overridden:true }
-    : { bias:aiBias, overridden:false };
+  if (!aiBias) return { bias: null, overridden: false, source: "none" };
+  if (!priceData?.live || priceData?.trend == null)
+    return { bias: aiBias, overridden: false, source: "ai" };
+  const liveBias = priceData.trend === "bullish" ? "Bullish" : "Bearish";
+  if (aiBias !== liveBias)
+    return { bias: liveBias, overridden: true, source: "live" };
+  return { bias: aiBias, overridden: false, source: "ai" };
 }
 
 // ─── Live Price Fetcher ───────────────────────────────────────────────
@@ -163,7 +163,7 @@ async function fetchFearGreed() {
   } catch { return { value:50, label:"Neutral", live:false }; }
 }
 
-// ─── Momentum (Apewisdom doesn't track futures — use live prices) ─────
+// ─── Momentum ─────────────────────────────────────────────────────────
 function deriveMomentum(prices) {
   const out = {};
   for (const a of ASSETS) {
@@ -230,7 +230,7 @@ async function fetchNews() {
   return { news:[], live:false, fetchedAt:new Date() };
 }
 
-// ─── Groq ─────────────────────────────────────────────────────────────
+// ─── FIXED: Groq ──────────────────────────────────────────────────────
 async function groq(apiKey, messages, max_tokens = 1800) {
   const r = await fetchJSON("https://api.groq.com/openai/v1/chat/completions", {
     method:"POST",
@@ -244,14 +244,28 @@ async function groq(apiKey, messages, max_tokens = 1800) {
   catch { const m = raw.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); throw new Error("JSON parse failed"); }
 }
 
-async function analyzeMarket({ fg, momentum, news, apiKey }) {
+// ─── FIXED: analyzeMarket — now receives prices & injects hard rule ───
+async function analyzeMarket({ fg, momentum, news, apiKey, prices }) {
   const newsText = news.slice(0, 6).map((h, i) => `${i + 1}. ${h.title}`).join("\n");
   const momText  = Object.entries(momentum).map(([k, v]) =>
     `${k}: ${v.change !== null ? (v.change > 0 ? "+" : "") + v.change + "% today" : "no data"} (${v.trend}, ${v.strength})`
   ).join(", ");
+
+  // Hard constraint from live prices — AI cannot contradict live direction
+  const priceConstraints = ASSETS.map(a => {
+    const p = prices?.[a.id];
+    if (!p?.live || p.trend == null) return null;
+    const dir = p.trend === "bullish" ? "Bullish" : "Bearish";
+    return `${a.id} is ${p.change > 0 ? "+" : ""}${p.change}% TODAY — bias MUST be "${dir}"`;
+  }).filter(Boolean).join("\n");
+
+  const hardRule = priceConstraints
+    ? `\n\nHARD RULE — LIVE PRICE OVERRIDES EVERYTHING:\n${priceConstraints}\nDo NOT set bias opposite to live price direction under any circumstance.\n`
+    : "";
+
   return groq(apiKey, [
     { role:"system", content:"You are a Wall Street ICT trading analyst. Return ONLY valid JSON. No markdown." },
-    { role:"user",   content:`Analyze real-time market data for OIL, GOLD, NQ futures trading.\n\nFear & Greed: ${fg.value}/100 (${fg.label})\nPrice momentum: ${momText}\nLatest news:\n${newsText}\n\nIMPORTANT KILLZONE RULES:\n- OIL/GOLD best killzone = London Open 2-5AM EST or NY AM 7-10AM EST\n- NQ best killzone = NY Open 9:30-11AM EST or NY PM 1-3PM EST\n\nReturn this exact JSON:\n{"regime":"UNCERTAINTY","regime_reason":"one sentence","correlation_warning":"one sentence or null","dxy_bias":"Bearish","dxy_reason":"one sentence","session_note":"one sentence","smart_money_note":"one sentence","assets":{"OIL":{"bias":"Bearish","move_type":"3-5 word phrase","approach":"entry stop target sentence","sentiment_edge":"Bearish","crowd_vs_smart":"Against crowd","smt_signal":"Diverging","smt_note":"one sentence","dxy_impact":"Headwind","killzone_edge":"London Open","key_level_bull":"$97","key_level_bear":"$91","bullish_real_pct":28,"bullish_trap_pct":72,"bearish_real_pct":68,"bearish_trap_pct":32},"GOLD":{"bias":"Bearish","move_type":"3-5 word phrase","approach":"sentence","sentiment_edge":"Bearish","crowd_vs_smart":"With crowd","smt_signal":"Confirming","smt_note":"sentence","dxy_impact":"Headwind","killzone_edge":"London Open","key_level_bull":"$5000","key_level_bear":"$4550","bullish_real_pct":22,"bullish_trap_pct":78,"bearish_real_pct":72,"bearish_trap_pct":28},"NQ":{"bias":"Trap","move_type":"3-5 word phrase","approach":"sentence","sentiment_edge":"Bullish","crowd_vs_smart":"Against crowd","smt_signal":"Diverging","smt_note":"sentence","dxy_impact":"Neutral","killzone_edge":"NY Open","key_level_bull":"25025","key_level_bear":"24411","bullish_real_pct":35,"bullish_trap_pct":65,"bearish_real_pct":58,"bearish_trap_pct":42}},"pair_trade":"sentence","risk_event":"sentence","macro_summary":"two sentences"}` },
+    { role:"user", content:`Analyze real-time market data for OIL, GOLD, NQ futures trading.${hardRule}\n\nFear & Greed: ${fg.value}/100 (${fg.label})\nPrice momentum: ${momText}\nLatest news:\n${newsText}\n\nIMPORTANT KILLZONE RULES:\n- OIL/GOLD best killzone = London Open 2-5AM EST or NY AM 7-10AM EST\n- NQ best killzone = NY Open 9:30-11AM EST or NY PM 1-3PM EST\n\nReturn this exact JSON:\n{"regime":"UNCERTAINTY","regime_reason":"one sentence","correlation_warning":"one sentence or null","dxy_bias":"Bearish","dxy_reason":"one sentence","session_note":"one sentence","smart_money_note":"one sentence","assets":{"OIL":{"bias":"Bearish","move_type":"3-5 word phrase","approach":"entry stop target sentence","sentiment_edge":"Bearish","crowd_vs_smart":"Against crowd","smt_signal":"Diverging","smt_note":"one sentence","dxy_impact":"Headwind","killzone_edge":"London Open","key_level_bull":"$97","key_level_bear":"$91","bullish_real_pct":28,"bullish_trap_pct":72,"bearish_real_pct":68,"bearish_trap_pct":32},"GOLD":{"bias":"Bearish","move_type":"3-5 word phrase","approach":"sentence","sentiment_edge":"Bearish","crowd_vs_smart":"With crowd","smt_signal":"Confirming","smt_note":"sentence","dxy_impact":"Headwind","killzone_edge":"London Open","key_level_bull":"$5000","key_level_bear":"$4550","bullish_real_pct":22,"bullish_trap_pct":78,"bearish_real_pct":72,"bearish_trap_pct":28},"NQ":{"bias":"Trap","move_type":"3-5 word phrase","approach":"sentence","sentiment_edge":"Bullish","crowd_vs_smart":"Against crowd","smt_signal":"Diverging","smt_note":"sentence","dxy_impact":"Neutral","killzone_edge":"NY Open","key_level_bull":"25025","key_level_bear":"24411","bullish_real_pct":35,"bullish_trap_pct":65,"bearish_real_pct":58,"bearish_trap_pct":42}},"pair_trade":"sentence","risk_event":"sentence","macro_summary":"two sentences"}` },
   ], 1800);
 }
 
@@ -263,7 +277,7 @@ async function analyzeNews({ news, apiKey }) {
   ], 2200);
 }
 
-// ─── useMarket hook ────────────────────────────────────────────────────
+// ─── FIXED: useMarket — passes prices to analyzeMarket ────────────────
 function useMarket(apiKey) {
   const [state, setState] = useState({
     status:"idle", market:null, news:[], momentum:{}, prices:{},
@@ -313,10 +327,10 @@ function useMarket(apiKey) {
       }));
 
       addLog("🤖 Running AI analysis...");
-      const market = await analyzeMarket({ fg, momentum, news, apiKey });
+      // FIXED: pass prices so hard rule constraint works
+      const market = await analyzeMarket({ fg, momentum, news, apiKey, prices });
       addLog("✅ Analysis complete.");
 
-      // Check for conflicts using the same resolveEffectiveBias used in UI
       const conflicts = ASSETS.filter(a =>
         resolveEffectiveBias(market?.assets?.[a.id]?.bias, prices?.[a.id]).overridden
       );
@@ -326,10 +340,12 @@ function useMarket(apiKey) {
         const priceCtx = ASSETS.map(a =>
           `${a.id}: live ${prices[a.id]?.change > 0 ? "+" : ""}${prices[a.id]?.change}% (${prices[a.id]?.trend?.toUpperCase()})`
         ).join(", ");
+        // FIXED: pass prices here too
         const market2 = await analyzeMarket({
           fg, momentum,
           news:[{ title:`LIVE PRICE UPDATE: ${priceCtx}. Adjust bias to match price direction.` }, ...news.slice(0, 5)],
           apiKey,
+          prices,
         });
         addLog("✅ Re-analysis complete.");
         setState(s => ({ ...s, market:market2, prices, status:"live", lastMarketUpdate:new Date(), error:null }));
@@ -551,10 +567,10 @@ function MomentumStrip({ momentum, live }) {
   );
 }
 
-// ─── Asset Card — Intel tab ────────────────────────────────────────────
+// ─── FIXED: Asset Card — Intel tab ────────────────────────────────────
 function AssetCard({ asset, data, price }) {
   const [open, setOpen] = useState(false);
-  const { bias:effectiveBias, overridden } = resolveEffectiveBias(data?.bias, price);
+  const { bias:effectiveBias, overridden, source } = resolveEffectiveBias(data?.bias, price);
   const bm         = BIAS_META[effectiveBias] || BIAS_META.Neutral;
   const smtC       = data?.smt_signal === "Diverging" ? "#f97316" : data?.smt_signal === "Confirming" ? "#22c55e" : "#64748b";
   const priceColor = price?.trend === "bullish" ? "#22c55e" : "#ef4444";
@@ -577,12 +593,17 @@ function AssetCard({ asset, data, price }) {
               </div>
             </div>
           </div>
+          {/* FIXED: badge clearly shows source + original AI bias when overridden */}
           {effectiveBias && (
-            <div style={{ background:bm.bg, border:`1px solid ${bm.border}`, borderRadius:8, padding:"5px 12px", flexShrink:0 }}>
-              <span style={{ fontFamily:F, fontSize:11, letterSpacing:2, color:bm.color }}>
-                {bm.icon} {overridden ? "LIVE" : "AI"}: {effectiveBias}
-                {overridden && <span style={{ color:"#f97316", marginLeft:3, fontSize:9 }}>↺</span>}
-              </span>
+            <div style={{ background:bm.bg, border:`1px solid ${bm.border}`, borderRadius:8, padding:"5px 12px", flexShrink:0, maxWidth:160 }}>
+              <div style={{ fontFamily:F, fontSize:11, letterSpacing:1, color:bm.color }}>
+                {bm.icon} {source === "live" ? "LIVE" : "AI"}: {effectiveBias}
+              </div>
+              {overridden && (
+                <div style={{ fontFamily:F, fontSize:9, color:"#f97316", marginTop:2 }}>
+                  AI was {data?.bias || "—"} ↺
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -598,7 +619,7 @@ function AssetCard({ asset, data, price }) {
         <div style={{ padding:"0 16px 18px", display:"flex", flexDirection:"column", gap:12, animation:"fadeup .22s ease" }}>
           {overridden && (
             <div style={{ background:"rgba(249,115,22,0.06)", border:"1px solid rgba(249,115,22,0.2)", borderRadius:10, padding:"9px 13px", fontFamily:F, fontSize:11, color:"rgba(255,255,255,0.45)", lineHeight:1.6 }}>
-              ⚠ Live price is <span style={{ color:priceColor }}>{price.trend.toUpperCase()}</span> — badge overridden from AI. Hit ↻ for fresh analysis.
+              ⚠ Live price is <span style={{ color:priceColor }}>{price.trend.toUpperCase()}</span> — bias overridden from AI ({data?.bias}). Hit ↻ for fresh analysis.
             </div>
           )}
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
@@ -766,9 +787,18 @@ function NewsTab({ rawNews, newsLive, lastUpdate, apiKey, onRefreshNews }) {
   );
 }
 
-// ─── Bias Tab ──────────────────────────────────────────────────────────
+// ─── FIXED: Bias Tab ──────────────────────────────────────────────────
 function BiasTab({ market, prices }) {
   const [userBias, setUserBias] = useState({ OIL:null, GOLD:null, NQ:null });
+
+  if (!market) {
+    return (
+      <div style={{ background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:14, padding:"28px 16px", textAlign:"center", fontFamily:F, fontSize:12, color:"rgba(255,255,255,0.3)", lineHeight:1.7 }}>
+        Tap ↻ on the Intel tab to load analysis first.
+      </div>
+    );
+  }
+
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
       {ASSETS.map(a => {
@@ -776,13 +806,31 @@ function BiasTab({ market, prices }) {
         const ub = userBias[a.id];
         const p  = prices?.[a.id];
 
-        const { bias:effectiveBias, overridden } = resolveEffectiveBias(d?.bias, p);
+        const { bias:effectiveBias, overridden, source } = resolveEffectiveBias(d?.bias, p);
         const ebm        = BIAS_META[effectiveBias] || BIAS_META.Neutral;
         const priceColor = p?.trend === "bullish" ? "#22c55e" : "#ef4444";
 
-        const rp = ub === "Bullish" ? (d?.bullish_real_pct ?? 50) : ub === "Bearish" ? (d?.bearish_real_pct ?? 50) : null;
-        const tp = ub === "Bullish" ? (d?.bullish_trap_pct ?? 50) : ub === "Bearish" ? (d?.bearish_trap_pct ?? 50) : null;
-        const isReal = rp !== null && rp >= tp;
+        // FIXED: strict type check, normalise to 100
+        let realPct = null, trapPct = null;
+        if (ub && d) {
+          if (ub === "Bullish") {
+            realPct = typeof d.bullish_real_pct === "number" ? d.bullish_real_pct : null;
+            trapPct = typeof d.bullish_trap_pct === "number" ? d.bullish_trap_pct : null;
+          } else {
+            realPct = typeof d.bearish_real_pct === "number" ? d.bearish_real_pct : null;
+            trapPct = typeof d.bearish_trap_pct === "number" ? d.bearish_trap_pct : null;
+          }
+          if (realPct !== null && trapPct !== null) {
+            const total = realPct + trapPct;
+            if (total > 0 && total !== 100) {
+              realPct = Math.round((realPct / total) * 100);
+              trapPct = 100 - realPct;
+            }
+          }
+        }
+
+        const hasPcts = realPct !== null && trapPct !== null;
+        const isReal  = hasPcts && realPct >= trapPct;
 
         return (
           <div key={a.id} style={{ background:"rgba(5,7,15,0.98)", border:"1px solid rgba(255,255,255,0.06)", borderTop:`3px solid ${a.color}`, borderRadius:16, padding:16, display:"flex", flexDirection:"column", gap:14, boxShadow:`0 4px 24px ${a.glow}` }}>
@@ -807,18 +855,22 @@ function BiasTab({ market, prices }) {
                     </div>
                     {overridden && (
                       <div style={{ background:"rgba(249,115,22,0.06)", border:"1px solid rgba(249,115,22,0.15)", borderRadius:9, padding:"8px 12px", fontFamily:F, fontSize:11, color:"rgba(255,255,255,0.45)", lineHeight:1.6 }}>
-                        Live price is <span style={{ color:priceColor }}>{p.trend.toUpperCase()}</span> — badge updated to match. Hit ↻ for full re-analysis.
+                        Live price is <span style={{ color:priceColor }}>{p.trend.toUpperCase()}</span> — badge updated. AI said {d?.bias}. Hit ↻ for full re-analysis.
                       </div>
                     )}
                   </div>
                 )}
               </div>
               {effectiveBias && (
-                <div style={{ marginLeft:"auto", background:ebm.bg, border:`1px solid ${ebm.border}`, borderRadius:8, padding:"4px 10px", flexShrink:0 }}>
-                  <span style={{ fontFamily:F, fontSize:10, color:ebm.color }}>
-                    {ebm.icon} {overridden ? "LIVE" : "AI"}: {effectiveBias}
-                    {overridden && <span style={{ color:"#f97316", marginLeft:4, fontSize:9 }}>↺</span>}
-                  </span>
+                <div style={{ marginLeft:"auto", background:ebm.bg, border:`1px solid ${ebm.border}`, borderRadius:8, padding:"4px 10px", flexShrink:0, maxWidth:160 }}>
+                  <div style={{ fontFamily:F, fontSize:10, color:ebm.color }}>
+                    {ebm.icon} {source === "live" ? "LIVE" : "AI"}: {effectiveBias}
+                  </div>
+                  {overridden && (
+                    <div style={{ fontFamily:F, fontSize:9, color:"#f97316", marginTop:1 }}>
+                      AI: {d?.bias || "—"} ↺
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -838,20 +890,39 @@ function BiasTab({ market, prices }) {
               })}
             </div>
 
-            {ub && rp !== null && (
+            {ub && (
               <div style={{ display:"flex", flexDirection:"column", gap:10, animation:"fadeup .25s ease" }}>
-                {[{ label:"✅ REAL MOVE", pct:rp, color:"#22c55e" },{ label:"⚡ TRAP RISK", pct:tp, color:"#f97316" }].map(b => (
-                  <div key={b.label}>
-                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:6 }}>
-                      <span style={{ fontFamily:F, fontSize:11, letterSpacing:2, color:b.color }}>{b.label}</span>
-                      <span style={{ fontFamily:FB, fontSize:32, color:b.color, lineHeight:1 }}>{b.pct}%</span>
-                    </div>
-                    <Bar pct={b.pct} color={b.color} h={7} />
+                {!hasPcts ? (
+                  <div style={{ background:"rgba(100,116,139,0.07)", border:"1px solid rgba(100,116,139,0.18)", borderRadius:10, padding:"12px 14px", fontFamily:F, fontSize:12, color:"rgba(255,255,255,0.35)", lineHeight:1.7, textAlign:"center" }}>
+                    No probability data for {a.id} — tap ↻ to refresh analysis.
                   </div>
-                ))}
-                <div style={{ background:isReal ? "rgba(34,197,94,0.07)" : "rgba(249,115,22,0.07)", border:`1px solid ${isReal ? "rgba(34,197,94,0.2)" : "rgba(249,115,22,0.2)"}`, borderRadius:10, padding:"12px 14px", fontFamily:F, fontSize:12, color:isReal ? "#4ade80" : "#fb923c", lineHeight:1.7, textAlign:"center" }}>
-                  {isReal ? `${ub} bias looks REAL — ${rp}% confidence.` : `${ub} looks like a TRAP — ${tp}% trap risk. Wait.`}
-                </div>
+                ) : (
+                  <>
+                    {[{ label:"✅ REAL MOVE", pct:realPct, color:"#22c55e" },{ label:"⚡ TRAP RISK", pct:trapPct, color:"#f97316" }].map(b => (
+                      <div key={b.label}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:6 }}>
+                          <span style={{ fontFamily:F, fontSize:11, letterSpacing:2, color:b.color }}>{b.label}</span>
+                          <span style={{ fontFamily:FB, fontSize:32, color:b.color, lineHeight:1 }}>{b.pct}%</span>
+                        </div>
+                        <Bar pct={b.pct} color={b.color} h={7} />
+                      </div>
+                    ))}
+                    <div style={{ background:isReal ? "rgba(34,197,94,0.07)" : "rgba(249,115,22,0.07)", border:`1px solid ${isReal ? "rgba(34,197,94,0.2)" : "rgba(249,115,22,0.2)"}`, borderRadius:10, padding:"12px 14px", fontFamily:F, fontSize:12, color:isReal ? "#4ade80" : "#fb923c", lineHeight:1.7, textAlign:"center" }}>
+                      {isReal
+                        ? `${ub} looks REAL — ${realPct}% real vs ${trapPct}% trap. Proceed with caution.`
+                        : `${ub} looks like a TRAP — ${trapPct}% trap risk vs ${realPct}% real. Wait for confirmation.`
+                      }
+                    </div>
+                    {effectiveBias && (
+                      <div style={{ background:ub === effectiveBias ? "rgba(34,197,94,0.05)" : "rgba(239,68,68,0.05)", border:`1px solid ${ub === effectiveBias ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)"}`, borderRadius:10, padding:"10px 13px", fontFamily:F, fontSize:11, color:ub === effectiveBias ? "#4ade80" : "#f87171", lineHeight:1.6 }}>
+                        {ub === effectiveBias
+                          ? `✅ Your bias aligns with the ${source === "live" ? "live price" : "AI"} read (${effectiveBias}).`
+                          : `⚠ Your bias (${ub}) conflicts with the ${source === "live" ? "live price" : "AI"} read (${effectiveBias}). High-risk trade.`
+                        }
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
             {!ub && <div style={{ fontFamily:F, fontSize:11, color:"rgba(255,255,255,0.15)", textAlign:"center", letterSpacing:1 }}>TAP ABOVE TO CHECK YOUR BIAS</div>}
