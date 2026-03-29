@@ -210,23 +210,51 @@ async function fetchNews() {
       }
     } catch {}
   }
+  // Try multiple RSS feeds in parallel — use whichever returns the most fresh headlines
+  const RSS_FEEDS = [
+    { url:"https://feeds.bbci.co.uk/news/business/rss.xml",                          source:"BBC"       },
+    { url:"https://feeds.marketwatch.com/marketwatch/realtimeheadlines/",             source:"MarketWatch"},
+    { url:"https://feeds.reuters.com/reuters/businessNews",                           source:"Reuters"   },
+    { url:"https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F,CL=F,NQ=F&region=US&lang=en-US", source:"Yahoo" },
+    { url:"https://www.investing.com/rss/news_285.rss",                               source:"Investing" },
+  ];
+
   try {
-    const r = await fetchJSON(
-      "https://api.allorigins.win/raw?url=" + encodeURIComponent("https://feeds.bbci.co.uk/news/business/rss.xml"),
-      {}, 8000
-    );
-    if (r.ok) {
-      const xml = new DOMParser().parseFromString(await r.text(), "text/xml");
-      const news = [...xml.querySelectorAll("item")].slice(0, 15).map(i => ({
-        title:i.querySelector("title")?.textContent?.trim() || "",
-        link: i.querySelector("link")?.textContent?.trim() || "",
-        pubDate:i.querySelector("pubDate")?.textContent?.trim() || "",
-        description:i.querySelector("description")?.textContent?.replace(/<[^>]*>/g, "")?.trim() || "",
-        source:"bbc",
-      })).filter(h => h.title.length > 5).sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
-      if (news.length > 0) return { news, live:true, fetchedAt:new Date() };
+    const allRss = [];
+    await Promise.allSettled(RSS_FEEDS.map(async feed => {
+      try {
+        const r = await fetchJSON(
+          "https://api.allorigins.win/raw?url=" + encodeURIComponent(feed.url), {}, 8000
+        );
+        if (!r.ok) return;
+        const xml = new DOMParser().parseFromString(await r.text(), "text/xml");
+        const items = [...xml.querySelectorAll("item")].slice(0, 10).map(i => ({
+          title:      i.querySelector("title")?.textContent?.trim() || "",
+          link:       i.querySelector("link")?.textContent?.trim() || "",
+          pubDate:    i.querySelector("pubDate")?.textContent?.trim() || "",
+          description:i.querySelector("description")?.textContent?.replace(/<[^>]*>/g, "")?.trim() || "",
+          source:     feed.source,
+        })).filter(h => h.title.length > 5);
+        allRss.push(...items);
+      } catch {}
+    }));
+
+    if (allRss.length > 0) {
+      // Deduplicate by title similarity and sort newest first
+      const seen = new Set();
+      const unique = allRss
+        .filter(h => {
+          const key = h.title.slice(0, 40).toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate))
+        .slice(0, 25);
+      if (unique.length > 0) return { news:unique, live:true, fetchedAt:new Date() };
     }
   } catch {}
+
   return { news:[], live:false, fetchedAt:new Date() };
 }
 
@@ -740,7 +768,10 @@ function NewsTab({ rawNews, newsLive, lastUpdate, apiKey, onRefreshNews }) {
         {(rawNews || []).map((h, i) => (
           <div key={i} style={{ paddingLeft:12, borderLeft:"2px solid rgba(255,255,255,0.07)", display:"flex", flexDirection:"column", gap:3 }}>
             <div style={{ fontFamily:F, fontSize:12, color:"rgba(255,255,255,0.55)", lineHeight:1.5 }}>{h.title}</div>
-            {h.pubDate && <span style={{ fontFamily:F, fontSize:9, color:"rgba(255,255,255,0.18)" }}>{new Date(h.pubDate).toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit", timeZone:"America/New_York" })} EST</span>}
+            <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+              {h.pubDate && <span style={{ fontFamily:F, fontSize:9, color:"rgba(255,255,255,0.18)" }}>{new Date(h.pubDate).toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit", timeZone:"America/New_York" })} EST</span>}
+              {h.source && <span style={{ fontFamily:F, fontSize:8, color:"rgba(255,255,255,0.12)", background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:4, padding:"1px 5px", letterSpacing:1 }}>{h.source.toUpperCase()}</span>}
+            </div>
           </div>
         ))}
       </div>
